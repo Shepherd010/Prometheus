@@ -1,0 +1,28 @@
+<launch>
+    <arg name="use_mid360" default="true" /> <!-- 设置是否使用仿真 -->
+    <arg name="publish_freq" default="10.0"/> <!-- 设置发布频率 -->
+    <arg name="xfer_format" default="1"/>     <!-- 设置发布格式 -->
+
+    <!-- 启动 mavros 的 px4.launch 文件 
+    <include file="$(find mavros)/launch/px4.launch">
+        <arg name="fcu_url" value="$(arg fcu_url)" />
+    </include> -->
+
+    <!-- 启动雷达ros驱动文件 -->
+    <arg name="uav_id" default="1"/>
+
+    <!-- 启动激光slam算法 -->
+    <include file="$(find direct_lidar_inertial_odometry)/launch/dlio.launch">
+        
+    </include>
+
+    <group if="$(arg use_mid360)">
+        <include file="$(find livox_ros_driver2)/launch_ROS1/msg_MID360.launch">
+            <arg name="publish_freq" value="$(arg publish_freq)"/>
+            <arg name="xfer_format" value="$(arg xfer_format)"/>
+        </include>
+    </group>
+
+    <!-- 启动mavros将slam算法里程计数据转为mavlink协议传输 -->
+    <!-- <include file="$(find mid360_to_mavros)/launch/dlio_to_mavros.launch" /> -->
+</launch>

@@ -14,6 +14,9 @@
 #include <mavros_msgs/RCIn.h>
 #include <mavros_msgs/CommandLong.h>
 #include <mavros_msgs/CommandHome.h>
+#include <mavros_msgs/ParamGet.h>
+#include <mavros_msgs/ParamSet.h>
+#include <mavros_msgs/ParamValue.h>
 
 #include <std_msgs/Bool.h>
 
@@ -23,6 +26,7 @@
 #include <prometheus_msgs/UAVCommand.h>
 #include <prometheus_msgs/TextInfo.h>
 #include <prometheus_msgs/OffsetPose.h>
+#include <prometheus_msgs/ParamSettings.h>
 
 #include <nav_msgs/Odometry.h>
 
@@ -34,6 +38,9 @@
 #include "pos_controller_PID.h"
 #include "pos_controller_UDE.h"
 #include "pos_controller_NE.h"
+
+#include "param_manager.hpp"
+#include "message_convert.hpp"
 
 using namespace std;
 
@@ -51,6 +58,8 @@ public:
     ros::Subscriber px4_attitude_target_sub;
     ros::Subscriber px4_rc_sub;
     ros::Subscriber offset_pose_sub;
+    // 地面站参数修改话题
+    ros::Subscriber ros_param_set_sub;
     // 发布话题
     ros::Publisher px4_setpoint_raw_local_pub;
     ros::Publisher px4_setpoint_raw_global_pub;
@@ -58,11 +67,15 @@ public:
     ros::Publisher uav_control_state_pub;
     ros::Publisher ground_station_info_pub;
     ros::Publisher stop_control_state_pub;
+    ros::Publisher serial_control_pub;
     // 服务
     ros::ServiceClient px4_arming_client;
     ros::ServiceClient px4_set_mode_client;
     ros::ServiceClient px4_reboot_client;
     ros::ServiceClient px4_emergency_client;
+    // 飞控参数获取/修改服务
+    ros::ServiceClient px4_param_get_client;
+    ros::ServiceClient px4_param_set_client;
 
     prometheus_msgs::UAVCommand uav_command;      // 指令
     prometheus_msgs::UAVCommand uav_command_last; // 上一时刻指令
@@ -108,6 +121,14 @@ public:
     };
     geo_fence uav_geo_fence;
 
+    // 记录px4参数根据定位源不同值
+    bool is_rebot_px4 = true;
+    bool reboot_px4_set_reset_ekf = false;
+    double mc_yawrate_max = 100.0;
+    double mpc_xy_vel_max = 1.0;
+    double mpc_acc_hor = 2.0;
+    double mpc_vel_manual = 1.0;
+
     // 基本变量
     int uav_id;      // 无人机编号
     string uav_name; // 无人机名字
@@ -119,13 +140,27 @@ public:
     float Takeoff_height; // 默认起飞高度
     float Disarm_height;  // 自动上锁高度
     float Land_speed;     // 降落速度
+    double COMMAND_MPC_XY_VEL_MAX;
+    double COMMAND_MPC_ACC_HOR;
     bool set_landing_des;
+
+    // PX4参数 用于存储需要修改的PX4参数
+    std::unordered_map<std::string, std::string> px4_params;
+    ros::NodeHandle nh;
 
     // 无人机状态量
     Eigen::Vector3d uav_pos;     // 无人机位置
     Eigen::Vector3d uav_vel;     // 无人机速度
     Eigen::Quaterniond uav_quat; // 无人机四元数
     double uav_yaw;
+
+    
+    float vel_control_grap = 0.04f;
+    float vel_control_Kp = 1.8f;
+    float Speed_decision_range = 0.009f;
+    bool vel_control = false;
+    Eigen::Vector3d prev_vel_sp;
+    Eigen::Vector3d current_pos;     // 控制中无人机当前位置
 
     // 目标设定值
     Eigen::Vector3d pos_des;
@@ -142,8 +177,9 @@ public:
     Eigen::Vector3d Hover_position;
     double Hover_yaw;
     ros::Time last_set_hover_pose_time;
+    ros::Time last_check_px4_location_source_time;
 
-
+    ros::Timer check_px4_location_source_timer;
     ros::Timer ground_station_info_timer;
 
     pos_controller_PID pos_controller_pid;
@@ -172,6 +208,7 @@ private:
     void px4_pos_target_cb(const mavros_msgs::PositionTarget::ConstPtr &msg);
     void px4_att_target_cb(const mavros_msgs::AttitudeTarget::ConstPtr &msg);
     void offset_pose_cb(const prometheus_msgs::OffsetPose::ConstPtr &msg);
+    void param_set_cb(const prometheus_msgs::ParamSettings::ConstPtr &msg);
     void sendStationTextInfo(const ros::TimerEvent &e);
 
     void set_command_des();
@@ -198,8 +235,15 @@ private:
     void arm_disarm_func(bool on_or_off);
     void enable_emergency_func();
     void reboot_PX4();
+    // MAVLINK 消息： SERIAL_CONTROL(126)的发布
+    // 这里主要模拟一个QGC终端 MAVLINK CONSOLE 的实现
+    void send_serial_control(const std::string &cmd);
 
-    void load_communication_param(ros::NodeHandle &nh);
+    std::unordered_map<std::string, std::string> get_px4_params(ros::NodeHandle &nh);
+    // 定时器检查当前定位源下飞控参数设置是否正确
+    void timercb_check_px4_location_source(const ros::TimerEvent &e);
+    bool px4_param_set(std::string param_id, int64_t param_value);
+    bool px4_param_set(std::string param_id, double param_value);
 };
 
 #endif

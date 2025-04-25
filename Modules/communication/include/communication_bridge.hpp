@@ -10,12 +10,6 @@
 #include "Struct.hpp"
 
 #include "uav_basic_topic.hpp"
-#include "ugv_basic_topic.hpp"
-#include "swarm_control_topic.hpp"
-#include "autonomous_landing_topic.hpp"
-#include "gimbal_basic_topic.hpp"
-#include "object_tracking_topic.hpp"
-#include "ego_planner_swarm_topic.hpp"
 
 #include <mutex>
 #include <condition_variable>
@@ -25,24 +19,6 @@
 #include "mavros_msgs/Waypoint.h"
 #include "mavros_msgs/WaypointList.h"
 
-//uav control
-// #define OPENUAVBASIC ""//"gnome-terminal -- roslaunch prometheus_uav_control uav_control_main_indoor.launch"
-// #define CLOSEUAVBASIC ""//"gnome-terminal -- rosnode kill /joy_node | gnome-terminal -- rosnode kill /uav_control_main_1"
-//rhea control
-// #define OPENUGVBASIC ""
-// #define CLOSEUGVBASIC ""
-//集群
-// #define OPENSWARMCONTROL ""
-// #define CLOSESWARMCONTROL ""
-//自主降落
-#define OPENAUTONOMOUSLANDING ""
-#define CLOSEAUTONOMOUSLANDING ""
-//目标识别与追踪
-#define OPENOBJECTTRACKING ""
-#define CLOSEOBJECTTRACKING ""
-//EGO Planner
-#define OPENEGOPLANNER ""
-#define CLOSEEGOPLANNER ""
 
 //杀掉除了通信节点和主节点的其他节点
 //分为两种情况  
@@ -58,8 +34,7 @@
 
 enum UserType
 {
-    UAV = 1,
-    UGV = 2
+    UAV = 1
 };
 
 typedef struct CPUPACKED
@@ -88,20 +63,15 @@ public:
 
     void recvData(struct UAVState uav_state);
     void recvData(struct UAVCommand uav_cmd);
-    void recvData(struct SwarmCommand swarm_command);
     void recvData(struct ConnectState connect_state);
     void recvData(struct GimbalControl gimbal_control);
     void recvData(struct GimbalService gimbal_service);
     void recvData(struct GimbalParamSet param_set);
     void recvData(struct WindowPosition window_position);
-    void recvData(struct UGVCommand ugv_command);
-    void recvData(struct UGVState ugv_state);
     void recvData(struct ImageData image_data);
     void recvData(struct UAVSetup uav_setup);
     void recvData(struct ModeSelection mode_selection);
     void recvData(struct ParamSettings param_settings);
-    void recvData(struct MultiBsplines multi_bsplines);
-    void recvData(struct Bspline bspline);
     void recvData(struct CustomDataSegment_1 custom_data_segment);
     // void recvData(struct CustomDataSegment_2 custom_data_segment);
     void recvData(struct Goal goal);
@@ -112,7 +82,6 @@ public:
 
     void sendControlParam();
     void sendCommunicationParam();
-    void sendSwarmParam();
     void sendCommandPubParam();
 
     void sendTextInfo(uint8_t message_type, std::string message);
@@ -137,37 +106,28 @@ public:
 
     //触发安全机制处理
     void triggerUAV();
-    void triggerSwarmControl();
-    void triggerUGV();
 
     //获取当前CPU使用率
     double getCPUUsage();
     //获取当前CPU温度
     double getCPUTemperature();
+    //切换定位
+    void switchLocationSource(int location_source);
 private:
-    // std::shared_ptr<SwarmControl> swarm_control_ ;
-    SwarmControl *swarm_control_ = NULL;
-    UGVBasic *ugv_basic_ = NULL;
-    UAVBasic *uav_basic_ = NULL;
-    // std::vector<UAVBasic*> swarm_control_simulation_;
-    std::map<int, UAVBasic *> swarm_control_simulation_;
-    std::map<int, UGVBasic *> swarm_ugv_control_simulation_;
-    AutonomousLanding *autonomous_landing_ = NULL;
-    GimbalBasic *gimbal_basic_ = NULL;
-    ObjectTracking *object_tracking_ = NULL;
+    std::shared_ptr<UAVBasic> uav_ = nullptr;
+    std::map<int, std::shared_ptr<UAVBasic>> uavs_;
 
-    EGOPlannerSwarm *ego_planner_ = NULL;
-    EGOPlannerSwarm *trajectoy_control_ = NULL;
+    std::mutex g_mutex_; // 防止
 
     int current_mode_ = 0;
 
-    int is_simulation_, swarm_num_, swarm_data_update_timeout_,swarm_ugv_num_;
-    int uav_id,ugv_id;
+    int is_simulation_;
+    int uav_id;
     ros::NodeHandle nh_;
 
     bool is_heartbeat_ready_ = false;
 
-    std::string OPENUAVBASIC = "", CLOSEUAVBASIC = "", OPENSWARMCONTROL = "", CLOSESWARMCONTROL = "",OPENUGVBASIC = "" , CLOSEUGVBASIC = "";
+    std::string OPENUAVBASIC = "", CLOSEUAVBASIC = "";
 
     ros::Timer heartbeat_check_timer;
     bool disconnect_flag = false;
@@ -179,8 +139,9 @@ private:
     // 记录 无人机或无人车的时间戳
     uint time = 0;
     uint time_count = 0;
-    std::vector<uint> swarm_control_time;
-    std::vector<uint> swarm_control_timeout_count;
+
+    // 是否自动启动
+    bool autoload = false;
 };
 
 template <typename T>

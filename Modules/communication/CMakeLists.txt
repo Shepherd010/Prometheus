@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.0.2)
 project(prometheus_communication_bridge)
 
 ## Compile as C++14, supported in ROS Kinetic and newer
-add_compile_options(-std=c++14)
+add_compile_options(-std=c++17)
 
 ## Find catkin macros and libraries
 ## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
@@ -21,6 +21,13 @@ find_package(catkin REQUIRED COMPONENTS
   prometheus_msgs
 )
 find_package(PCL 1.7 REQUIRED)
+find_package(mavlink REQUIRED)
+#uncomment the following 4 lines to use the Eigen library
+find_package(cmake_modules REQUIRED)
+find_package(Eigen3 REQUIRED)
+
+
+
 
 generate_messages(
   DEPENDENCIES
@@ -52,7 +59,11 @@ include_directories(
   ${PROJECT_SOURCE_DIR}/shard/include
   ${PROJECT_SOURCE_DIR}/shard/include/json/include
   ${PCL_INCLUDE_DIRS}
+  ${mavlink_INCLUDE_DIRS}
 )
+
+include_directories(${EIGEN3_INCLUDE_DIR})
+add_definitions(${EIGEN_DEFINITIONS})
 link_directories(${PCL_LIBRARY_DIRS})
 
 file(GLOB_RECURSE CURRENT_INCLUDE include/*.hpp include/*.h)

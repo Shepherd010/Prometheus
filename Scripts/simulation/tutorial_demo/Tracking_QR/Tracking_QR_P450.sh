@@ -6,7 +6,15 @@ gnome-terminal -- bash -c "~/SpireCV/ZLM/startMediaServer.sh; exec bash"
 
 sleep 1.5s
 
-gnome-terminal -- bash -c "roslaunch prometheus_demo aruco_tracking.launch; exec bash"
+# 获取 prometheus_gazebo 的路径
+PROMETHEUS_GAZEBO_PATH=$(rospack find prometheus_gazebo)
+# 二维码 world 文件路径
+WORLD_FILE="$PROMETHEUS_GAZEBO_PATH/gazebo_worlds/detection_worlds/Tracking_QR/Tracking_QR.world"
+
+gnome-terminal --window -e 'bash -c "roscore; exec bash"' \
+--tab -e 'bash -c "sleep 3; roslaunch prometheus_gazebo sitl_indoor_1uav_P450.launch vehicle:='p450_D435i' d435i_enable:=true world:='$WORLD_FILE'; exec bash"' \
+--tab -e 'bash -c "sleep 6; roslaunch prometheus_uav_control uav_control_main_indoor.launch; exec bash"' \
+--tab -e 'bash -c "sleep 8; roslaunch prometheus_demo aruco_tracking_control.launch; exec bash"' \
 
 echo “prometheus_Tracking_QR  successfully started”
 # 两个roslauch之间需要间隔一段时间，否则会相互抢占roscore,导致其中一个roslaunch失败,报runid错误

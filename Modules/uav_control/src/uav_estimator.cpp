@@ -1,6 +1,6 @@
 #include "uav_estimator.h"
 
-UAV_estimator::UAV_estimator(ros::NodeHandle &nh)
+UAV_estimator::UAV_estimator(ros::NodeHandle &nh): nh(nh)
 {
     // 【参数】编号
     nh.param<int>("uav_id", uav_id, 1);
@@ -35,6 +35,14 @@ UAV_estimator::UAV_estimator(ros::NodeHandle &nh)
     nh.param<float>("T265/offset_roll", t265_offset.roll, 0.0);
     nh.param<float>("T265/offset_pitch", t265_offset.pitch, 0.0);
     nh.param<float>("T265/offset_yaw", t265_offset.yaw, 0.0);
+    
+    // 【参数】BSA_SLAM tf相对于base_link偏移量
+    nh.param<float>("BSA_SLAM/offset_x", BSA_SLAM_offset.x, 0.0);
+    nh.param<float>("BSA_SLAM/offset_y", BSA_SLAM_offset.y, 0.0);
+    nh.param<float>("BSA_SLAM/offset_z", BSA_SLAM_offset.z, 0.0);
+    nh.param<float>("BSA_SLAM/offset_roll", BSA_SLAM_offset.roll, 0.0);
+    nh.param<float>("BSA_SLAM/offset_pitch", BSA_SLAM_offset.pitch, 0.0);
+    nh.param<float>("BSA_SLAM/offset_yaw", BSA_SLAM_offset.yaw, 0.0);
 
     // 【参数】UWB tf相对于A0基站端偏移量
     nh.param<float>("UWB/offset_x", uwb_offset.x, 0.0);
@@ -80,6 +88,20 @@ UAV_estimator::UAV_estimator(ros::NodeHandle &nh)
         // 【订阅】T265估计位置
         t265_sub = nh.subscribe<nav_msgs::Odometry>("/t265/odom/sample", 1, &UAV_estimator::t265_cb, this);
     }
+    else if (location_source == prometheus_msgs::UAVState::OPTICAL_FLOW)
+    {
+        // 光流定位直连飞控，飞控积分获得位置，在Prometheus中并不做操作
+    }
+    else if (location_source == prometheus_msgs::UAVState::viobot)
+    {
+        // 【订阅】viobot估计位置
+        viobot_sub = nh.subscribe<nav_msgs::Odometry>("/pr_loop/odometry_rect", 1, &UAV_estimator::viobot_cb, this);
+    }
+    else if (location_source == prometheus_msgs::UAVState::MID360)
+    {
+        // 【订阅】MID360估计位置    
+        mid360_sub = nh.subscribe<nav_msgs::Odometry>("/Odometry", 1, &UAV_estimator::mid360_cb, this);
+    }
     else if (location_source == prometheus_msgs::UAVState::GAZEBO)
     {
         // 【订阅】gazebo仿真真值
@@ -110,12 +132,19 @@ UAV_estimator::UAV_estimator(ros::NodeHandle &nh)
         // 【订阅】UWB
         uwb_sub = nh.subscribe<prometheus_msgs::LinktrackNodeframe2>("/nlink_linktrack_nodeframe2", 10, &UAV_estimator::uwb_cb, this);
     }
+    else if (location_source == prometheus_msgs::UAVState::BSA_SLAM)
+    {
+        // 【订阅】BSA_SLAM估计位置
+        BSA_SLAM_sub = nh.subscribe<nav_msgs::Odometry>("/BSAslam/odometry", 1, &UAV_estimator::BSA_SLAM_cb, this);
+    }
     else
     {
         text_info.MessageType = prometheus_msgs::TextInfo::WARN;
         text_info.Message = node_name + ": wrong location_source param, no external location information input!";
         cout << YELLOW << node_name << ": wrong location_source param, no external location information input!" << TAIL << endl;
     }
+    // 【订阅】地面站修改ROS参数
+    ros_param_set_sub = nh.subscribe<prometheus_msgs::ParamSettings>(uav_name + "/prometheus/param_settings", 1, &UAV_estimator::param_set_cb, this);
 
     // 【发布】无人机状态合集,包括位置\速度\姿态\模式等,供上层节点使用
     uav_state_pub = nh.advertise<prometheus_msgs::UAVState>(uav_name + "/prometheus/state", 1);
@@ -138,7 +167,7 @@ UAV_estimator::UAV_estimator(ros::NodeHandle &nh)
     // 【发布】运行状态信息(-> 通信节点 -> 地面站)
     ground_station_info_pub = nh.advertise<prometheus_msgs::TextInfo>("/uav" + std::to_string(uav_id) + "/prometheus/text_info", 1);
 
-    if (location_source == prometheus_msgs::UAVState::MOCAP || location_source == prometheus_msgs::UAVState::T265 || location_source == prometheus_msgs::UAVState::GAZEBO || location_source == prometheus_msgs::UAVState::UWB|| location_source == prometheus_msgs::UAVState::VINS)
+    if (location_source == prometheus_msgs::UAVState::MOCAP || location_source == prometheus_msgs::UAVState::BSA_SLAM || location_source == prometheus_msgs::UAVState::T265 || location_source == prometheus_msgs::UAVState::viobot || location_source == prometheus_msgs::UAVState::GAZEBO || location_source == prometheus_msgs::UAVState::UWB|| location_source == prometheus_msgs::UAVState::VINS || location_source == prometheus_msgs::UAVState::MID360)
     {
         // 【定时器】当需要使用外部定位设备时，需要定时发送vision信息至飞控,并保证一定频率
         timer_px4_vision_pub = nh.createTimer(ros::Duration(0.02), &UAV_estimator::timercb_pub_vision_pose, this);
@@ -200,6 +229,10 @@ void UAV_estimator::timercb_pub_uav_state(const ros::TimerEvent &e)
 {
     if (!uav_state_update)
     {
+        // 发布uav_state
+        // uav_state.header.stamp = ros::Time::now();
+        uav_state.odom_valid = false;
+        uav_state_pub.publish(uav_state);
         return;
     }
 
@@ -270,6 +303,23 @@ void UAV_estimator::timercb_pub_vision_pose(const ros::TimerEvent &e)
     {
         vision_pose = t265_pose;
     }
+    else if (location_source == prometheus_msgs::UAVState::viobot)
+    {
+
+        vision_pose.header.stamp = ros::Time::now();
+        vision_pose.pose.position.x = viobot_pose.pose.position.x;
+        vision_pose.pose.position.y = viobot_pose.pose.position.y;
+        vision_pose.pose.position.z = viobot_pose.pose.position.z;
+        vision_pose.pose.orientation.x = q_viobot.x();
+        vision_pose.pose.orientation.y = q_viobot.y();
+        vision_pose.pose.orientation.z = q_viobot.z();
+        vision_pose.pose.orientation.w = q_viobot.w();
+
+    }
+    else if (location_source == prometheus_msgs::UAVState::MID360)
+    {
+        vision_pose = mid360_pose;
+    }
     else if (location_source == prometheus_msgs::UAVState::UWB)
     {
  	//j作为计数变量，初始值为0，这里循环6次为了排除初始UWB位置值不准，以第6次为准，测试下来在LinkTrack S型号UWB是没有问题的
@@ -301,6 +351,10 @@ void UAV_estimator::timercb_pub_vision_pose(const ros::TimerEvent &e)
     {
         vision_pose = vins_pose;
     }
+    else if (location_source == prometheus_msgs::UAVState::BSA_SLAM)
+    {
+        vision_pose = BSA_SLAM_pose;
+    }
     else
     {
         vision_pose_error = true;
@@ -329,7 +383,7 @@ void UAV_estimator::timercb_rviz(const ros::TimerEvent &e)
     {
         return;
     }
-
+    
     // 发布无人机运动轨迹，用于rviz显示
     geometry_msgs::PoseStamped uav_pos;
     uav_pos.header.stamp = ros::Time::now();
@@ -343,6 +397,7 @@ void UAV_estimator::timercb_rviz(const ros::TimerEvent &e)
     {
         pos_vector.pop_back();
     }
+    
     nav_msgs::Path uav_trajectory;
     uav_trajectory.header.stamp = ros::Time::now();
     uav_trajectory.header.frame_id = "world";
@@ -484,6 +539,34 @@ void UAV_estimator::timercb_rviz(const ros::TimerEvent &e)
         //  |--------- 广播器发布数据
         broadcaster.sendTransform(tfs);
     }
+    else if(location_source == prometheus_msgs::UAVState::BSA_SLAM)
+    {
+        //  |----坐标系相对信息设置  偏移量  无人机相对于世界坐标系的坐标
+        tfs.transform.translation.x = BSA_SLAM_offset.x;
+        tfs.transform.translation.y = BSA_SLAM_offset.y;
+        tfs.transform.translation.z = BSA_SLAM_offset.z;
+
+        //  |--------- 四元数设置
+        tfs.transform.rotation.x = 0.00;
+        tfs.transform.rotation.y = 0.00;
+        tfs.transform.rotation.z = 0.00;
+        tfs.transform.rotation.w = 1.00;
+
+        tf2::convert(tfs.transform.rotation , q_orig);
+
+        q_rot.setRPY(BSA_SLAM_offset.roll, BSA_SLAM_offset.pitch, BSA_SLAM_offset.yaw);//求得 tf 的旋转四元数
+
+        q_new = q_orig*q_rot;  // 通过 姿态的四元数 乘以旋转的四元数 即为 旋转 后的  四元数
+        q_new.normalize(); // 归一化
+
+        //  将 旋转后的 tf 四元数 转换 为 msg 四元数
+        tf2::convert(q_new, tfs.transform.rotation);
+
+        tfs.child_frame_id = "/BSA_SLAM_link"; //子坐标系，无人机的坐标系
+        // tfs.child_frame_id = "/camera_link"; //子坐标系，无人机的坐标系
+        //  |--------- 广播器发布数据
+        broadcaster.sendTransform(tfs);
+    }
 }
 
 void UAV_estimator::px4_state_cb(const mavros_msgs::State::ConstPtr &msg)
@@ -590,6 +673,44 @@ void UAV_estimator::t265_cb(const nav_msgs::Odometry::ConstPtr &msg)
     get_t265_stamp = ros::Time::now(); // 记录时间戳，防止超时
 }
 
+void UAV_estimator::BSA_SLAM_cb(const nav_msgs::Odometry::ConstPtr &msg)
+{
+    BSA_SLAM_pose.header = msg->header;
+    BSA_SLAM_pose.pose = msg->pose.pose;
+    get_BSA_SLAM_stamp = ros::Time::now(); // 记录时间戳，防止超时
+}
+
+void UAV_estimator::viobot_cb(const nav_msgs::Odometry::ConstPtr &msg) 
+{
+    viobot_pose.header = msg->header;
+    viobot_pose.pose = msg->pose.pose;
+
+    q_viobot = Eigen::Quaterniond(
+        msg->pose.pose.orientation.w,
+        msg->pose.pose.orientation.x,
+        msg->pose.pose.orientation.y,
+        msg->pose.pose.orientation.z
+    );
+
+    Eigen::Quaterniond rotation1(Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitX()));
+    Eigen::Quaterniond rotation2(Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ()));
+
+    q_viobot = q_viobot * rotation1 * rotation2;
+
+    Euler_viobot = quaternion_to_euler(q_viobot);
+
+    get_viobot_stamp = ros::Time::now(); // 记录时间戳，防止超时
+}
+
+void UAV_estimator::mid360_cb(const nav_msgs::Odometry::ConstPtr &msg)
+{
+    mid360_pose.header.frame_id = msg->header.frame_id;
+    mid360_pose.header.stamp = ros::Time::now();
+    mid360_pose.pose = msg->pose.pose;
+
+    get_mid360_stamp = ros::Time::now(); // 记录时间戳，防止超时
+   
+}
 void UAV_estimator::fake_odom_cb(const nav_msgs::Odometry::ConstPtr &msg)
 {
     // uav_state 直接赋值
@@ -640,6 +761,7 @@ void UAV_estimator::check_uav_state()
     {
         text_info.MessageType = prometheus_msgs::TextInfo::ERROR;
         text_info.Message = "Odom invalid: Velocity too large!";
+
         cout << RED << node_name << "--->  Odom invalid: Velocity too large! " << TAIL << endl;
     }
     else if (odom_state == 3 && last_odom_state != 3)
@@ -702,9 +824,6 @@ int UAV_estimator::check_uav_odom()
     // odom失效可能原因1：外部定位数据接收超时
     if (location_source == prometheus_msgs::UAVState::GAZEBO && (time_now - get_gazebo_stamp).toSec() > GAZEBO_TIMEOUT)
     {
-        cout << RED << "time_now:[ " << (time_now).toSec() << " ] s" << TAIL << endl;
-        cout << RED << "get_gazebo_stamp:[ " << (get_gazebo_stamp).toSec() << " ] s" << TAIL << endl;
-        cout << RED << "Timeout:[ " << (time_now - get_gazebo_stamp).toSec() << " ] s" << TAIL << endl;
         return 1;
     }
     else if (location_source == prometheus_msgs::UAVState::MOCAP && (time_now - get_mocap_stamp).toSec() > MOCAP_TIMEOUT)
@@ -712,6 +831,14 @@ int UAV_estimator::check_uav_odom()
         return 1;
     }
     else if (location_source == prometheus_msgs::UAVState::T265 && (time_now - get_t265_stamp).toSec() > T265_TIMEOUT)
+    {
+        return 1;
+    }
+    else if (location_source == prometheus_msgs::UAVState::viobot && (time_now - get_viobot_stamp).toSec() > VIOBOT_TIMEOUT)
+    {
+        return 1;
+    }
+    else if (location_source == prometheus_msgs::UAVState::MID360 && (time_now - get_mid360_stamp).toSec() > MID360_TIMEOUT)
     {
         return 1;
     }
@@ -724,12 +851,12 @@ int UAV_estimator::check_uav_odom()
     {
         return 1;
     }
+    else if (location_source == prometheus_msgs::UAVState::BSA_SLAM && (time_now - get_BSA_SLAM_stamp).toSec() > BSA_SLAM_TIMEOUT)
+    {
+        return 1;
+    }
     else if ((location_source == prometheus_msgs::UAVState::GPS || location_source == prometheus_msgs::UAVState::RTK) && (time_now - get_gps_stamp).toSec() > GPS_TIMEOUT)
     {
-        cout << RED << "time_now:[ " << (time_now).toSec() << " ] s" << TAIL << endl;
-        cout << RED << "get_gps_stamp:[ " << (get_gps_stamp).toSec() << " ] s" << TAIL << endl;
-        cout << RED << "Timeout:[ " << (time_now - get_gps_stamp).toSec() << " ] s" << TAIL << endl;
-
         return 7;
     }
     
@@ -822,6 +949,19 @@ void UAV_estimator::printf_uav_state()
         cout << GREEN << "Location: [ T265 ] " << TAIL << endl;
         cout << GREEN << "T265_pos [X Y Z] : " << t265_pose.pose.position.x << " [ m ] " << t265_pose.pose.position.y << " [ m ] " << t265_pose.pose.position.z << " [ m ] " << TAIL << endl;
         break;
+    case prometheus_msgs::UAVState::OPTICAL_FLOW:
+        cout << GREEN << "Location: [ OPTICAL_FLOW ] " << TAIL << endl;
+        cout << GREEN << "OPTICAL_FLOW_pos [X Y Z] : " << uav_state.position[0] << " [ m ] " << uav_state.position[1] << " [ m ] " << uav_state.position[2] << " [ m ] " << TAIL << endl;
+        break;
+    case prometheus_msgs::UAVState::viobot:
+        cout << GREEN << "Location: [ viobot ] " << TAIL << endl;
+        cout << GREEN << "viobot_pos [X Y Z] : " << viobot_pose.pose.position.x << " [ m ] " << viobot_pose.pose.position.y << " [ m ] " << viobot_pose.pose.position.z << " [ m ] " << TAIL << endl;
+        cout << GREEN << "viobot_p [W X Y Z ] : " << vision_pose.pose.orientation.w << " [ ] "<< vision_pose.pose.orientation.x << " [ ] " << vision_pose.pose.orientation.y << " [ ] " << vision_pose.pose.orientation.z << " [ ] "  << TAIL << endl;
+        break;
+    case prometheus_msgs::UAVState::MID360:
+        cout << GREEN << "Location: [ MID360 ] " << TAIL << endl;
+        cout << GREEN << "MID360_pos [X Y Z] : " << mid360_pose.pose.position.x << " [ m ] " << mid360_pose.pose.position.y << " [ m ] " << mid360_pose.pose.position.z << " [ m ] " << TAIL << endl;
+        break;
     case prometheus_msgs::UAVState::GAZEBO:
         cout << GREEN << "Location: [ GAZEBO ] " << TAIL << endl;
         cout << GREEN << "GAZEBO_pos [X Y Z] : " << gazebo_pose.pose.position.x << " [ m ] " << gazebo_pose.pose.position.y << " [ m ] " << gazebo_pose.pose.position.z << " [ m ] " << TAIL << endl;
@@ -845,6 +985,10 @@ void UAV_estimator::printf_uav_state()
     case prometheus_msgs::UAVState::VINS:
         cout << GREEN << "Location: [ VINS ] " << TAIL << endl;
         cout << GREEN << "VINS_pos [X Y Z] : " << vins_pose.pose.position.x << " [ m ] " << vins_pose.pose.position.y << " [ m ] " << vins_pose.pose.position.z << " [ m ] " << TAIL << endl;
+        break;
+    case prometheus_msgs::UAVState::BSA_SLAM:
+        cout << GREEN << "Location: [ BSA_SLAM ] " << TAIL << endl;
+        cout << GREEN << "BSA_SLAM_pos [X Y Z] : " << BSA_SLAM_pose.pose.position.x << " [ m ] " << BSA_SLAM_pose.pose.position.y << " [ m ] " << BSA_SLAM_pose.pose.position.z << " [ m ] " << TAIL << endl;
         break;
     }
 
@@ -940,6 +1084,18 @@ void UAV_estimator::printf_param()
     {
         cout << GREEN << "location_source: [T265] " << TAIL << endl;
     }
+    else if (location_source == prometheus_msgs::UAVState::OPTICAL_FLOW)
+    {
+        cout << GREEN << "location_source: [OPTICAL_FLOW] " << TAIL << endl;
+    }
+    else if (location_source == prometheus_msgs::UAVState::viobot)
+    {
+        cout << GREEN << "location_source: [viobot] " << TAIL << endl;
+    }
+    else if (location_source == prometheus_msgs::UAVState::MID360)
+    {
+        cout << GREEN << "location_source: [MID360] " << TAIL << endl;
+    }
     else if (location_source == prometheus_msgs::UAVState::FAKE_ODOM)
     {
         cout << GREEN << "location_source: [FAKE_ODOM] " << TAIL << endl;
@@ -959,6 +1115,10 @@ void UAV_estimator::printf_param()
     else if (location_source == prometheus_msgs::UAVState::VINS)
     {
         cout << GREEN << "location_source: [VINS] " << TAIL << endl;
+    }
+    else if (location_source == prometheus_msgs::UAVState::BSA_SLAM)
+    {
+        cout << GREEN << "location_source: [BSA_SLAM] " << TAIL << endl;
     }
     else
     {
@@ -1007,6 +1167,96 @@ void UAV_estimator::gps_satellites_cb(const std_msgs::UInt32::ConstPtr &msg)
     uav_state.gps_num = msg->data;
 }
 
+void UAV_estimator::param_set_cb(const prometheus_msgs::ParamSettings::ConstPtr &msg)
+{
+    try
+    {
+        size_t size = msg->param_name.size();
+        for(size_t i = 0; i < size; i++)
+        {
+            // 如果不包含本节点名则跳过
+            if (msg->param_name[i].find("/uav_control_main_" + std::to_string(uav_id) + "/") == std::string::npos)
+                continue;
+
+            std::cout << msg->param_name[i] << " : " << msg->param_value[i] << std::endl;
+
+            // 有些参数必须在未解锁前才能修改
+            if(msg->param_name[i].find("control/location_source") != std::string::npos)
+            {
+                if(!uav_state.armed)
+                    switch_location_source(location_source, std::stoi(msg->param_value[i]));
+            }
+            else if(msg->param_name[i].find("control/maximum_safe_vel_xy") != std::string::npos)
+                maximum_safe_vel_xy = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("control/maximum_safe_vel_z") != std::string::npos)
+                maximum_safe_vel_z = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("control/maximum_vel_error_for_vision") != std::string::npos)
+                maximum_vel_error_for_vision = std::stod(msg->param_value[i]);
+            // d435i offset
+            else if(msg->param_name[i].find("D435i/offset_x") != std::string::npos)
+                d435i_offset.x = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("D435i/offset_y") != std::string::npos)
+                d435i_offset.y = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("D435i/offset_z") != std::string::npos)
+                d435i_offset.z = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("D435i/offset_roll") != std::string::npos)
+                d435i_offset.roll = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("D435i/offset_pitch") != std::string::npos)
+                d435i_offset.pitch = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("D435i/offset_yaw") != std::string::npos)
+                d435i_offset.yaw = std::stod(msg->param_value[i]);
+            // lidar offset
+            else if(msg->param_name[i].find("Lidar/offset_x") != std::string::npos)
+                lidar_offset.x = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("Lidar/offset_y") != std::string::npos)
+                lidar_offset.y = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("Lidar/offset_z") != std::string::npos)
+                lidar_offset.z = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("Lidar/offset_roll") != std::string::npos)
+                lidar_offset.roll = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("Lidar/offset_pitch") != std::string::npos)
+                lidar_offset.pitch = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("Lidar/offset_yaw") != std::string::npos)
+                lidar_offset.yaw = std::stod(msg->param_value[i]);
+            // t265
+            else if(msg->param_name[i].find("T265/offset_x") != std::string::npos)
+                t265_offset.x = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("T265/offset_y") != std::string::npos)
+                t265_offset.y = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("T265/offset_z") != std::string::npos)
+                t265_offset.z = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("T265/offset_roll") != std::string::npos)
+                t265_offset.roll = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("T265/offset_pitch") != std::string::npos)
+                t265_offset.pitch = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("T265/offset_yaw") != std::string::npos)
+                t265_offset.yaw = std::stod(msg->param_value[i]);
+            // BSA_SLAM
+            else if(msg->param_name[i].find("BSA_SLAM/offset_x") != std::string::npos)
+                BSA_SLAM_offset.x = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("BSA_SLAM/offset_y") != std::string::npos)
+                BSA_SLAM_offset.y = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("BSA_SLAM/offset_z") != std::string::npos)
+                BSA_SLAM_offset.z = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("BSA_SLAM/offset_roll") != std::string::npos)
+                BSA_SLAM_offset.roll = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("BSA_SLAM/offset_pitch") != std::string::npos)
+                BSA_SLAM_offset.pitch = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("BSA_SLAM/offset_yaw") != std::string::npos)
+                BSA_SLAM_offset.yaw = std::stod(msg->param_value[i]);
+            // uwb offset
+            else if(msg->param_name[i].find("UWB/offset_x") != std::string::npos)
+                uwb_offset.x = std::stod(msg->param_value[i]);
+            else if(msg->param_name[i].find("UWB/offset_y") != std::string::npos)
+                uwb_offset.y = std::stod(msg->param_value[i]);
+        }
+    }
+    catch(const std::exception& e)
+    {
+        std::cerr << e.what() << '\n';
+    }
+}
+
 //向地面发送反馈信息,如果重复,将不会发送
 void UAV_estimator::sendStationTextInfo(const ros::TimerEvent &e)
 {
@@ -1021,15 +1271,113 @@ void UAV_estimator::sendStationTextInfo(const ros::TimerEvent &e)
         this->last_text_info = this->text_info;
         return;
     }
-    
 }
 
-//加载通信节点的配置参数，可通过地面站进行修改
-void UAV_estimator::load_communication_param(ros::NodeHandle &nh)
+void UAV_estimator::switch_location_source(int old_location_source, int new_location_source)
 {
-    //如果该参数名的参数不存在则不会生效
-    nh.getParam("/communication_bridge/control/location_source",location_source);
-    nh.getParam("/communication_bridge/control/maximum_safe_vel_xy",maximum_safe_vel_xy);
-    nh.getParam("/communication_bridge/control/maximum_safe_vel_z",maximum_safe_vel_z);
-    nh.getParam("/communication_bridge/control/maximum_vel_error_for_vision",maximum_vel_error_for_vision);
+    if(old_location_source == new_location_source) return;
+
+    if(timer_px4_vision_pub.isValid())
+    {
+        timer_px4_vision_pub.stop();
+    }
+    
+    // 关闭话题
+    switch(old_location_source)
+    {
+    case prometheus_msgs::UAVState::MOCAP:
+        mocap_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::T265:
+        t265_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::GAZEBO:
+        gazebo_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::FAKE_ODOM:
+        fake_odom_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::GPS:
+    case prometheus_msgs::UAVState::RTK:
+        gps_status_sub.shutdown();
+        px4_global_position_sub.shutdown();
+        px4_rel_alt_sub.shutdown();
+        set_local_pose_offset_sub.shutdown();
+        local_pose_offset_pub.shutdown();
+        gps_satellites_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::UWB:
+        uwb_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::VINS:
+        vins_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::OPTICAL_FLOW:
+        break;
+    case prometheus_msgs::UAVState::viobot:
+        viobot_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::MID360:
+        mid360_sub.shutdown();
+        break;
+    case prometheus_msgs::UAVState::BSA_SLAM:
+        BSA_SLAM_sub.shutdown();
+        break;
+    }
+
+    location_source = new_location_source;
+    uav_state.location_source = location_source;
+
+    switch(new_location_source)
+    {
+    case prometheus_msgs::UAVState::MOCAP:
+        mocap_sub = nh.subscribe<geometry_msgs::PoseStamped>("/vrpn_client_node" + uav_name + "/pose", 1, &UAV_estimator::mocap_cb, this);
+        break;
+    case prometheus_msgs::UAVState::T265:
+        t265_sub = nh.subscribe<nav_msgs::Odometry>("/t265/odom/sample", 1, &UAV_estimator::t265_cb, this);
+        break;
+    case prometheus_msgs::UAVState::GAZEBO:
+        gazebo_sub = nh.subscribe<nav_msgs::Odometry>(uav_name + "/prometheus/ground_truth", 1, &UAV_estimator::gazebo_cb, this);
+        break;
+    case prometheus_msgs::UAVState::FAKE_ODOM:
+        fake_odom_sub = nh.subscribe<nav_msgs::Odometry>(uav_name + "/prometheus/fake_odom", 10, &UAV_estimator::fake_odom_cb, this);
+        break;
+    case prometheus_msgs::UAVState::GPS:
+    case prometheus_msgs::UAVState::RTK:
+        gps_status_sub = nh.subscribe<mavros_msgs::GPSRAW>(uav_name + "/mavros/gpsstatus/gps1/raw", 10, &UAV_estimator::gps_status_cb, this);
+        px4_global_position_sub = nh.subscribe<sensor_msgs::NavSatFix>(uav_name + "/mavros/global_position/global", 1, &UAV_estimator::px4_global_pos_cb, this);
+        px4_rel_alt_sub = nh.subscribe<std_msgs::Float64>(uav_name + "/mavros/global_position/rel_alt", 1, &UAV_estimator::px4_global_rel_alt_cb, this);
+        set_local_pose_offset_sub = nh.subscribe<prometheus_msgs::GPSData>(uav_name + "/prometheus/set_local_offset_pose", 1, &UAV_estimator::set_local_pose_offset_cb, this);
+        local_pose_offset_pub = nh.advertise<prometheus_msgs::OffsetPose>(uav_name + "/prometheus/offset_pose", 1);
+        gps_satellites_sub = nh.subscribe<std_msgs::UInt32>(uav_name + "/mavros/global_position/raw/satellites", 1, &UAV_estimator::gps_satellites_cb, this);
+        break;
+    case prometheus_msgs::UAVState::UWB:
+        uwb_sub = nh.subscribe<prometheus_msgs::LinktrackNodeframe2>("/nlink_linktrack_nodeframe2", 10, &UAV_estimator::uwb_cb, this);
+        break;
+    case prometheus_msgs::UAVState::VINS:
+        vins_sub = nh.subscribe<geometry_msgs::PoseStamped>("/vins_estimator/imu_propagate", 1, &UAV_estimator::vins_cb, this);
+        break;
+    case prometheus_msgs::UAVState::OPTICAL_FLOW:
+        break;
+    case prometheus_msgs::UAVState::viobot:
+        viobot_sub = nh.subscribe<nav_msgs::Odometry>("/pr_loop/odometry_rect", 1, &UAV_estimator::viobot_cb, this);
+        break;
+    case prometheus_msgs::UAVState::MID360:
+        mid360_sub = nh.subscribe<nav_msgs::Odometry>("/Odometry", 1, &UAV_estimator::mid360_cb, this);
+        break;
+    case prometheus_msgs::UAVState::BSA_SLAM:
+        BSA_SLAM_sub = nh.subscribe<nav_msgs::Odometry>("/BSAslam/odometry", 1, &UAV_estimator::BSA_SLAM_cb, this);
+        break;
+    default:
+        text_info.MessageType = prometheus_msgs::TextInfo::WARN;
+        text_info.Message = node_name + ": wrong location_source param, no external location information input!";
+        cout << YELLOW << node_name << ": wrong location_source param, no external location information input!" << TAIL << endl;
+        break;
+    }
+
+    if (location_source == prometheus_msgs::UAVState::MOCAP || location_source == prometheus_msgs::UAVState::BSA_SLAM || location_source == prometheus_msgs::UAVState::T265 || location_source == prometheus_msgs::UAVState::viobot || location_source == prometheus_msgs::UAVState::GAZEBO || location_source == prometheus_msgs::UAVState::UWB|| location_source == prometheus_msgs::UAVState::VINS || location_source == prometheus_msgs::UAVState::MID360)
+    {
+        // 【定时器】当需要使用外部定位设备时，需要定时发送vision信息至飞控,并保证一定频率
+        timer_px4_vision_pub = nh.createTimer(ros::Duration(0.02), &UAV_estimator::timercb_pub_vision_pose, this);
+    }
 }

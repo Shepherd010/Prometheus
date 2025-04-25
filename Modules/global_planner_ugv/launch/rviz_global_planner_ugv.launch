@@ -1,3 +1,0 @@
-<launch>
-  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find prometheus_global_planner_ugv)/launch/rviz_global_planner_ugv.rviz" required="true" />
-</launch>

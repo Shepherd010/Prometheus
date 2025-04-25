@@ -1,0 +1,1 @@
+roslaunch prometheus_gazebo sitl_indoor_1uav_P600_mid360.launch

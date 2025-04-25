@@ -20,7 +20,22 @@
 // 自定义消息
 #include "prometheus_msgs/CustomDataSegment.h"
 #include "prometheus_msgs/BasicDataTypeAndValue.h"
+#include "prometheus_msgs/ParamSettings.h"
 #include "custom_data_segment.hpp"
+
+#include "geometry_msgs/Polygon.h"
+#include "std_msgs/Float32.h"
+
+#include <Eigen/Eigen>
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
+#include <Eigen/Eigenvalues>
+
+#include "message_convert.hpp"
+
+// 定义常量
+constexpr double WGS84_A = 6378137.0;           // WGS84 椭球长半轴
+constexpr double WGS84_F = 1.0 / 298.257223563; // WGS84 扁率
 
 class UAVBasic
 {
@@ -69,12 +84,27 @@ public:
     void customDataSegmentPub(struct CustomDataSegment_1 custom_data_segment);
 
     void gimbalControlPubTimer(const ros::TimerEvent &time_event);
+
+
+    // MAVLINK 消息： SERIAL_CONTROL(126)的发布/接收 
+    // 这里主要模拟一个QGC终端 MAVLINK CONSOLE 的实现
+    void serialControlPub(const std::string &cmd);
+    void serialControlCb(const mavros_msgs::Mavlink::ConstPtr &msg);
+
+    void paramSettingsPub(struct ParamSettings param_settings, std::string prefix = "");
+
+    void setGroundStationIP(std::string ip);
+
+    Eigen::Vector3d calculate_enu_position_in_uav_frame(struct UAVState uav_state, double target_lat, double target_lon, double target_alt);
+
 private:
+    ros::NodeHandle nh_;
+
     ros::Subscriber uav_state_sub_;
 
-    //反馈信息
+    // 反馈信息
     ros::Subscriber text_info_sub_;
-    //控制状态
+    // 控制状态
     ros::Subscriber uav_control_state_sub_;
     ros::Publisher uav_cmd_pub_;
     ros::Publisher uav_setup_pub_;
@@ -88,8 +118,15 @@ private:
 
     ros::Subscriber offset_pose_sub_;
 
+    // 自定义消息
     ros::Subscriber custom_data_segment_sub_;
     ros::Publisher custom_data_segment_pub_;
+
+    // SERIAL_CONTROL(126)
+    ros::Subscriber serial_control_sub_;
+    ros::Publisher serial_control_pub_;
+
+    ros::Publisher param_settings_pub_;
 
     ros::ServiceClient gimbal_home_client_;
     ros::ServiceClient gimbal_take_client_;

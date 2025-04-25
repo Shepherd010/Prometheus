@@ -20,6 +20,7 @@ find_package(catkin REQUIRED COMPONENTS
 
 ## System dependencies are found with CMake's conventions
 find_package(Boost REQUIRED COMPONENTS system)
+find_package(mavlink REQUIRED)
 
 ################################################
 ## Declare ROS messages, services and actions ##
@@ -47,13 +48,15 @@ include_directories(
   ${catkin_INCLUDE_DIRS}
   include/Position_Controller
   ../common/include
+  ../communication/include
+  ${mavlink_INCLUDE_DIRS}
 )
 
 
 ###############################
 ##      声明可执行cpp文件     ##
 ###############################
-add_library(uav_controller src/uav_controller.cpp)
+add_library(uav_controller src/uav_controller.cpp ../communication/src/param_manager.cpp)
 add_library(uav_estimator src/uav_estimator.cpp)
 target_link_libraries(uav_estimator ${catkin_LIBRARIES})
 
